@@ -4,13 +4,12 @@ import time
 from urllib.parse import quote
 
 from ...typing import CreateResult, Messages
-from ..base_provider import BaseProvider
+from ..base_provider import AbstractProvider
 from ..helper import format_prompt
-from ..webdriver import WebDriver, WebDriverSession
 
-class Phind(BaseProvider):
+class Phind(AbstractProvider):
     url = "https://www.phind.com"
-    working = True
+    working = False
     supports_gpt_4 = True
     supports_stream = True
 
@@ -22,11 +21,10 @@ class Phind(BaseProvider):
         stream: bool,
         proxy: str = None,
         timeout: int = 120,
-        webdriver: WebDriver = None,
+        webdriver = None,
         creative_mode: bool = None,
         **kwargs
     ) -> CreateResult:
-        driver.start_session
         with WebDriverSession(webdriver, "", proxy=proxy) as driver:
             from selenium.webdriver.common.by import By
             from selenium.webdriver.support.ui import WebDriverWait
