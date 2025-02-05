@@ -1,61 +1,89 @@
 from __future__ import annotations
-
-import random
-from ..requests import StreamSession
+import time
+from aiohttp import ClientSession
 
 from ..typing import AsyncResult, Messages
-from .base_provider import AsyncGeneratorProvider, format_prompt
+from ..requests.raise_for_status import raise_for_status
+from .base_provider import AsyncGeneratorProvider, ProviderModelMixin
+from .helper import format_prompt
+from ..providers.response import FinishReason, JsonConversation
 
+class Conversation(JsonConversation):
+    userId: str = None
+    message_history: Messages = []
 
-class Yqcloud(AsyncGeneratorProvider):
-    url = "https://chat9.yqcloud.top/"
+    def __init__(self, model: str):
+        self.model = model
+        self.userId = f"#/chat/{int(time.time() * 1000)}"
+
+class Yqcloud(AsyncGeneratorProvider, ProviderModelMixin):
+    url = "https://chat9.yqcloud.top"
+    api_endpoint = "https://api.binjie.fun/api/generateStream"
+    
     working = True
-    supports_gpt_35_turbo = True
+    supports_stream = True
+    supports_system_message = True
+    supports_message_history = True
+    
+    default_model = "gpt-4"
+    models = [default_model]
 
-    @staticmethod
+    @classmethod
     async def create_async_generator(
+        cls,
         model: str,
         messages: Messages,
+        stream: bool = True,
         proxy: str = None,
-        timeout: int = 120,
-        **kwargs,
-    ) -> AsyncResult:
-        async with StreamSession(
-            headers=_create_header(), proxies={"https": proxy}, timeout=timeout
-        ) as session:
-            payload = _create_payload(messages, **kwargs)
-            async with session.post("https://api.aichatos.cloud/api/generateStream", json=payload) as response:
-                response.raise_for_status()
-                async for chunk in response.iter_content():
+        conversation: Conversation = None,
+        return_conversation: bool = False,
+        **kwargs
+    ) -> AsyncResult:      
+        model = cls.get_model(model)
+        headers = {
+            "accept": "application/json, text/plain, */*",
+            "accept-language": "en-US,en;q=0.9",
+            "content-type": "application/json",
+            "origin": f"{cls.url}",
+            "referer": f"{cls.url}/",
+            "user-agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+        }
+        
+        if conversation is None:
+            conversation = Conversation(model)
+            conversation.message_history = messages
+        else:
+            conversation.message_history.append(messages[-1])
+
+        # Extract system message if present
+        system_message = ""
+        current_messages = conversation.message_history
+        if current_messages and current_messages[0]["role"] == "system":
+            system_message = current_messages[0]["content"]
+            current_messages = current_messages[1:]
+        
+        async with ClientSession(headers=headers) as session:
+            prompt = format_prompt(current_messages)
+            data = {
+                "prompt": prompt,
+                "userId": conversation.userId,
+                "network": True,
+                "system": system_message,
+                "withoutContext": False,
+                "stream": stream
+            }
+            
+            async with session.post(cls.api_endpoint, json=data, proxy=proxy) as response:
+                await raise_for_status(response)
+                full_message = ""
+                async for chunk in response.content:
                     if chunk:
-                        chunk = chunk.decode()
-                        if "sorry, 您的ip已由于触发防滥用检测而被封禁" in chunk:
-                            raise RuntimeError("IP address is blocked by abuse detection.")
-                        yield chunk
+                        message = chunk.decode()
+                        yield message
+                        full_message += message
 
-
-def _create_header():
-    return {
-        "accept"        : "application/json, text/plain, */*",
-        "content-type"  : "application/json",
-        "origin"        : "https://chat9.yqcloud.top",
-        "referer"       : "https://chat9.yqcloud.top/"
-    }
-
-
-def _create_payload(
-    messages: Messages,
-    system_message: str = "",
-    user_id: int = None,
-    **kwargs
-):
-    if not user_id:
-        user_id = random.randint(1690000544336, 2093025544336)
-    return {
-        "prompt": format_prompt(messages),
-        "network": True,
-        "system": system_message,
-        "withoutContext": False,
-        "stream": True,
-        "userId": f"#/chat/{user_id}"
-    }
+                if return_conversation:
+                    conversation.message_history.append({"role": "assistant", "content": full_message})
+                    yield conversation
+                
+                yield FinishReason("stop")
